@@ -1,5 +1,4 @@
 defmodule StdJsonIo do
-
   defmacro __using__(opts) do
     otp_app = Keyword.get(opts, :otp_app)
 
@@ -10,28 +9,55 @@ defmodule StdJsonIo do
     quote do
       use Supervisor
       @pool_name Module.concat(__MODULE__, Pool)
-      @options Keyword.merge(unquote(opts), (Application.get_env(unquote(otp_app), __MODULE__) || []))
-
+      @default_options [
+        pool_size: 5,
+        max_overflow: 10,
+        watch_files: [],
+        worker: true,
+        reloader: true
+      ]
+      @options @default_options
+        |> Keyword.merge(unquote(opts))
+        |> Keyword.merge(Application.get_env(unquote(otp_app), __MODULE__, []))
 
       def start_link(opts \\ []) do
         Supervisor.start_link(__MODULE__, :ok, name: {:local, __MODULE__})
       end
 
       def init(:ok) do
+        worker = start_worker(Keyword.get(@options, :worker))
+        reloader = start_reloader(Keyword.get(@options, :worker) && Keyword.get(@options, :reloader))
+
+        [worker, reloader]
+        |> Enum.filter(fn(x) -> x end)
+        |> supervise(strategy: :one_for_one, name: __MODULE__)
+      end
+
+      #
+      # Worker starts only if opposite wasn't specified in options
+      #
+      defp start_worker(false), do: nil
+      defp start_worker(true) do
         pool_options = [
           name: {:local, @pool_name},
           worker_module: StdJsonIo.Worker,
-          size: Keyword.get(@options, :pool_size, 5),
-          max_overflow: Keyword.get(@options, :max_overflow, 10)
+          size: Keyword.get(@options, :pool_size),
+          max_overflow: Keyword.get(@options, :max_overflow)
         ]
 
         script = Keyword.get(@options, :script)
 
-        children = [:poolboy.child_spec(@pool_name, pool_options, [script: script])]
+        :poolboy.child_spec(@pool_name, pool_options, [script: script])
+      end
 
+      #
+      # Reloader starts only if worker started and it was specified in options
+      #
+      defp start_reloader(false), do: nil
+      defp start_reloader(true) do
         files = Keyword.get(@options, :watch_files)
 
-        if files && length(files) > 0 do
+        if length(files) > 0 do
           Application.ensure_started(:fs, :permanent)
 
           reloader_spec = worker(
@@ -39,11 +65,7 @@ defmodule StdJsonIo do
             [__MODULE__, Enum.map(files, &Path.expand/1)],
             []
           )
-
-          children = [reloader_spec | children]
         end
-
-        supervise(children, strategy: :one_for_one, name: __MODULE__)
       end
 
       def restart_io_workers! do
